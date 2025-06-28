@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  mcp-server:
+    build: .
+    ports:
+      - "3003:3003"
+    environment:
+      - NODE_ENV=development
+      - PORT=3003
+      - REDIS_URL=redis://redis:6379
+      - SUPABASE_URL=https://supatalk.talkhub.me
+      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ewogICJyb2xlIjogImFub24iLAogICJpc3MiOiAic3VwYWJhc2UiLAogICJpYXQiOiAxNzE1MDUwODAwLAogICJleHAiOiAxODcyODE3MjAwCn0.chLQyRz8PtQQCKYNrJvOfViDq769cZ226xHPNjAoGUc
+      - JWT_SECRET=dev_jwt_secret_for_local_testing
+      - ADMIN_SECRET=dev_admin_secret_for_local_testing
+      - WEBHOOK_SECRET=dev_webhook_secret_for_local_testing
+      - LOG_LEVEL=debug
+      - RATE_LIMIT_WINDOW=1
+      - RATE_LIMIT_MAX=1000
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+    command: npm run dev
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+
+  # Opcional: Redis Commander para visualizar dados do Redis
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    hostname: redis-commander
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    depends_on:
+      - redis
+    profiles:
+      - tools
+
+  # Opcional: Adminer para visualizar dados do Supabase
+  adminer:
+    image: adminer
+    ports:
+      - "8080:8080"
+    environment:
+      - ADMINER_DEFAULT_SERVER=supatalk.talkhub.me:5344
+    profiles:
+      - tools
+
+volumes:
+  redis_data:
+
+networks:
+  default:
+    name: talkhub-dev

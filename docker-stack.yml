@@ -1,0 +1,233 @@
+version: "3.7"
+
+## Comandos para executar antes do deploy:
+## docker network create --driver=overlay talkhub
+## docker volume create talkhub_mcp_redis_data
+## docker volume create talkhub_mcp_logs_data
+
+services:
+
+## --------------------------- TALKHUB MCP SERVER --------------------------- ##
+  talkhub-mcp-server:
+    image: ghcr.io/<SEU_USUARIO_GH>/talkhub-mcp-server:latest
+    networks:
+      - talkhub
+    volumes:
+      - mcp_logs:/app/logs
+    environment:
+      - NODE_ENV=production
+      - PORT=3003
+      - REDIS_URL=redis://redis:6379
+      
+      # Configurações Supabase
+      - SUPABASE_URL=https://supatalk.talkhub.me
+      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ewogICJyb2xlIjogImFub24iLAogICJpc3MiOiAic3VwYWJhc2UiLAogICJpYXQiOiAxNzE1MDUwODAwLAogICJleHAiOiAxODcyODE3MjAwCn0.chLQyRz8PtQQCKYNrJvOfViDq769cZ226xHPNjAoGUc
+      
+      # Configurações JWT e Segurança
+      - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_SECRET=${ADMIN_SECRET}
+      
+      # Configurações da API
+      - API_VERSION=v1
+      - LOG_LEVEL=info
+      - RATE_LIMIT_WINDOW=15
+      - RATE_LIMIT_MAX=1000
+      
+      # Configurações específicas do TalkHub
+      - ALLOWED_ORIGINS=https://talkhub.me,https://*.talkhub.me,https://uchat.com.ai,https://*.uchat.com.ai
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      
+    deploy:
+      replicas: 2
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2048M
+        reservations:
+          cpus: "1"
+          memory: 1024M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 60s
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.talkhub-mcp.rule=Host(`mcp.talkhub.me`)"
+        - "traefik.http.routers.talkhub-mcp.entrypoints=websecure"
+        - "traefik.http.routers.talkhub-mcp.tls.certresolver=letsencryptresolver"
+        - "traefik.http.services.talkhub-mcp.loadbalancer.server.port=3003"
+        - "traefik.docker.network=talkhub"
+        # Health-check
+        - "traefik.http.services.talkhub-mcp.loadbalancer.healthcheck.path=/api/health"
+        - "traefik.http.services.talkhub-mcp.loadbalancer.healthcheck.interval=30s"
+
+## --------------------------- REDIS (Cache para Sessões) --------------------------- ##
+  redis:
+    image: redis:7-alpine
+    command: [
+        "redis-server",
+        "--appendonly", "yes",
+        "--port", "6379",
+        "--maxmemory", "2048mb",
+        "--maxmemory-policy", "allkeys-lru",
+        "--save", "900", "1",
+        "--save", "300", "10",
+        "--save", "60", "10000"
+      ]
+    volumes:
+      - redis_data:/data
+    networks:
+      - talkhub
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2048M
+        reservations:
+          cpus: "0.2"
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+
+## --------------------------- TALKHUB WEBHOOK HANDLER --------------------------- ##
+  talkhub-webhook:
+    image: ghcr.io/<SEU_USUARIO_GH>/talkhub-webhook:latest
+    networks:
+      - talkhub
+    environment:
+      - NODE_ENV=production
+      - PORT=3004
+      - MCP_SERVER_URL=http://talkhub-mcp-server:3003
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - SUPABASE_URL=https://supatalk.talkhub.me
+      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ewogICJyb2xlIjogImFub24iLAogICJpc3MiOiAic3VwYWJhc2UiLAogICJpYXQiOiAxNzE1MDUwODAwLAogICJleHAiOiAxODcyODE3MjAwCn0.chLQyRz8PtQQCKYNrJvOfViDq769cZ226xHPNjAoGUc
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1024M
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.talkhub-webhook.rule=Host(`webhook.talkhub.me`)"
+        - "traefik.http.routers.talkhub-webhook.entrypoints=websecure"
+        - "traefik.http.routers.talkhub-webhook.tls.certresolver=letsencryptresolver"
+        - "traefik.http.services.talkhub-webhook.loadbalancer.server.port=3004"
+        - "traefik.docker.network=talkhub"
+
+## --------------------------- TALKHUB DASHBOARD --------------------------- ##
+  talkhub-dashboard:
+    image: ghcr.io/<SEU_USUARIO_GH>/talkhub-dashboard:latest
+    networks:
+      - talkhub
+    environment:
+      - NODE_ENV=production
+      - PORT=3005
+      - API_URL=http://talkhub-mcp-server:3003
+      - SUPABASE_URL=https://supatalk.talkhub.me
+      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ewogICJyb2xlIjogImFub24iLAogICJpc3MiOiAic3VwYWJhc2UiLAogICJpYXQiOiAxNzE1MDUwODAwLAogICJleHAiOiAxODcyODE3MjAwCn0.chLQyRz8PtQQCKYNrJvOfViDq769cZ226xHPNjAoGUc
+      - ADMIN_SECRET=${ADMIN_SECRET}
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.talkhub-dashboard.rule=Host(`dashboard.talkhub.me`)"
+        - "traefik.http.routers.talkhub-dashboard.entrypoints=websecure"
+        - "traefik.http.routers.talkhub-dashboard.tls.certresolver=letsencryptresolver"
+        - "traefik.http.services.talkhub-dashboard.loadbalancer.server.port=3005"
+        - "traefik.docker.network=talkhub"
+
+## --------------------------- MONITORAMENTO --------------------------- ##
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - talkhub
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.prometheus.rule=Host(`prometheus.talkhub.me`)"
+        - "traefik.http.routers.prometheus.entrypoints=websecure"
+        - "traefik.http.routers.prometheus.tls.certresolver=letsencryptresolver"
+        - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+        - "traefik.docker.network=talkhub"
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - talkhub
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.grafana.rule=Host(`monitoring.talkhub.me`)"
+        - "traefik.http.routers.grafana.entrypoints=websecure"
+        - "traefik.http.routers.grafana.tls.certresolver=letsencryptresolver"
+        - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+        - "traefik.docker.network=talkhub"
+
+# Definição de volumes
+volumes:
+  mcp_logs:
+    external: true
+    name: talkhub_mcp_logs_data
+  redis_data:
+    external: true
+    name: talkhub_mcp_redis_data
+  grafana_data:
+    external: true
+    name: talkhub_grafana_data
+
+# Definição de redes
+networks:
+  talkhub:
+    external: true
+    name: talkhub
