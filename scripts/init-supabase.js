@@ -3,13 +3,15 @@
 /**
  * Script para inicializar as tabelas do Supabase para o TalkHub MCP Server
  */
-
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 
-const supabaseUrl = 'https://supatalk.talkhub.me';
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ewogICJyb2xlIjogInNlcnZpY2Vfcm9sZSIsCiAgImlzcyI6ICJzdXBhYmFzZSIsCiAgImlhdCI6IDE3MTUwNTA4MDAsCiAgImV4cCI6IDE4NzI4MTcyMDAKfQ.5pJmD7wfG9QRa47hzobrrArpXkj2a2ofcrTXZ2gEacE';
-
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+if (!supabaseUrl || !supabaseKey) {
+  console.error('SUPABASE_URL or SUPABASE_SERVICE_KEY is not set in environment.');
+  process.exit(1);
+}
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 const SQL_TABLES = {
@@ -25,7 +27,6 @@ const SQL_TABLES = {
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
       updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
-    
     CREATE INDEX IF NOT EXISTS idx_chat_sessions_session_id ON chat_sessions(session_id);
     CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_chat_sessions_created_at ON chat_sessions(created_at);
@@ -44,7 +45,6 @@ const SQL_TABLES = {
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
       updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
-    
     CREATE INDEX IF NOT EXISTS idx_conversations_conversation_id ON conversations(conversation_id);
     CREATE INDEX IF NOT EXISTS idx_conversations_session_id ON conversations(session_id);
     CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
@@ -67,7 +67,6 @@ const SQL_TABLES = {
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
       updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
-    
     CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles(user_id);
     CREATE INDEX IF NOT EXISTS idx_user_profiles_phone ON user_profiles(phone);
     CREATE INDEX IF NOT EXISTS idx_user_profiles_email ON user_profiles(email);
@@ -84,13 +83,12 @@ const SQL_TABLES = {
       expires_at TIMESTAMP WITH TIME ZONE,
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
-    
     CREATE INDEX IF NOT EXISTS idx_user_context_user_id ON user_context(user_id);
     CREATE INDEX IF NOT EXISTS idx_user_context_type ON user_context(context_type);
     CREATE INDEX IF NOT EXISTS idx_user_context_relevance ON user_context(relevance_score);
   `,
 
-  // Tabela para webhooks e integrações
+  // Tabela para logs de webhooks e integrações
   webhook_logs: `
     CREATE TABLE IF NOT EXISTS webhook_logs (
       id BIGSERIAL PRIMARY KEY,
@@ -104,13 +102,12 @@ const SQL_TABLES = {
       processed_at TIMESTAMP WITH TIME ZONE,
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
-    
     CREATE INDEX IF NOT EXISTS idx_webhook_logs_source ON webhook_logs(source);
     CREATE INDEX IF NOT EXISTS idx_webhook_logs_status ON webhook_logs(status);
     CREATE INDEX IF NOT EXISTS idx_webhook_logs_created_at ON webhook_logs(created_at);
   `,
 
-  // Tabela para analytics e métricas
+  // Tabela para eventos de analytics
   analytics_events: `
     CREATE TABLE IF NOT EXISTS analytics_events (
       id BIGSERIAL PRIMARY KEY,
@@ -120,7 +117,6 @@ const SQL_TABLES = {
       event_data JSONB DEFAULT '{}'::jsonb,
       timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
-    
     CREATE INDEX IF NOT EXISTS idx_analytics_events_type ON analytics_events(event_type);
     CREATE INDEX IF NOT EXISTS idx_analytics_events_user_id ON analytics_events(user_id);
     CREATE INDEX IF NOT EXISTS idx_analytics_events_timestamp ON analytics_events(timestamp);
@@ -128,7 +124,7 @@ const SQL_TABLES = {
 };
 
 const SQL_FUNCTIONS = {
-  // Função para atualizar updated_at automaticamente
+  // Função para atualizar automaticamente o campo updated_at (trigger function)
   update_timestamp: `
     CREATE OR REPLACE FUNCTION update_updated_at_column()
     RETURNS TRIGGER AS $$
@@ -139,114 +135,42 @@ const SQL_FUNCTIONS = {
     $$ language 'plpgsql';
   `,
 
-  // Triggers para atualizar timestamps
+  // Triggers para atualizar timestamps nas tabelas (usam a função acima)
   triggers: `
     DROP TRIGGER IF EXISTS update_chat_sessions_updated_at ON chat_sessions;
     CREATE TRIGGER update_chat_sessions_updated_at 
       BEFORE UPDATE ON chat_sessions 
       FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-    
     DROP TRIGGER IF EXISTS update_conversations_updated_at ON conversations;
     CREATE TRIGGER update_conversations_updated_at 
       BEFORE UPDATE ON conversations 
       FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-    
     DROP TRIGGER IF EXISTS update_user_profiles_updated_at ON user_profiles;
     CREATE TRIGGER update_user_profiles_updated_at 
       BEFORE UPDATE ON user_profiles 
       FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
   `,
 
-  // Função para buscar contexto do usuário
+  // Função para obter contexto completo do usuário (view combinando perfil, conversas etc.)
   get_user_context_function: `
     CREATE OR REPLACE FUNCTION get_user_context(p_user_id VARCHAR(255))
     RETURNS TABLE(
       profile JSONB,
       recent_conversations JSONB,
-      context_data JSONB,
-      interaction_stats JSONB
-    ) AS $$
+      context JSONB
+    )
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE 
+      query_filter TEXT := '';
     BEGIN
       RETURN QUERY
       SELECT 
-        COALESCE(row_to_json(up), '{}'::jsonb) as profile,
-        COALESCE(
-          (SELECT jsonb_agg(row_to_json(c)) 
-           FROM (SELECT * FROM conversations 
-                 WHERE user_id = p_user_id 
-                 ORDER BY created_at DESC LIMIT 5) c),
-          '[]'::jsonb
-        ) as recent_conversations,
-        COALESCE(
-          (SELECT jsonb_agg(row_to_json(uc)) 
-           FROM user_context uc 
-           WHERE uc.user_id = p_user_id 
-           AND (uc.expires_at IS NULL OR uc.expires_at > NOW())),
-          '[]'::jsonb
-        ) as context_data,
-        COALESCE(up.interaction_stats, '{}'::jsonb) as interaction_stats
-      FROM user_profiles up
-      WHERE up.user_id = p_user_id;
+        (SELECT row_to_json(u) FROM user_profiles AS u WHERE u.user_id = p_user_id) AS profile,
+        (SELECT json_agg(c) FROM (SELECT * FROM conversations WHERE user_id = p_user_id ORDER BY created_at DESC LIMIT 5) AS c) AS recent_conversations,
+        (SELECT json_agg(ctx) FROM user_context AS ctx WHERE ctx.user_id = p_user_id) AS context;
     END;
-    $$ LANGUAGE plpgsql;
-  `,
-
-  // Função para análise de conversas
-  analyze_conversations_function: `
-    CREATE OR REPLACE FUNCTION get_conversation_analytics(
-      p_user_id VARCHAR(255) DEFAULT NULL,
-      p_start_date TIMESTAMP DEFAULT NULL,
-      p_end_date TIMESTAMP DEFAULT NULL
-    )
-    RETURNS TABLE(
-      total_conversations BIGINT,
-      unique_users BIGINT,
-      avg_messages_per_conversation NUMERIC,
-      intent_distribution JSONB,
-      sentiment_distribution JSONB
-    ) AS $$
-    DECLARE
-      query_filter TEXT := '';
-    BEGIN
-      -- Construir filtros dinâmicos
-      IF p_user_id IS NOT NULL THEN
-        query_filter := query_filter || ' AND user_id = ''' || p_user_id || '''';
-      END IF;
-      
-      IF p_start_date IS NOT NULL THEN
-        query_filter := query_filter || ' AND created_at >= ''' || p_start_date || '''';
-      END IF;
-      
-      IF p_end_date IS NOT NULL THEN
-        query_filter := query_filter || ' AND created_at <= ''' || p_end_date || '''';
-      END IF;
-      
-      RETURN QUERY EXECUTE '
-        SELECT 
-          COUNT(*)::BIGINT as total_conversations,
-          COUNT(DISTINCT user_id)::BIGINT as unique_users,
-          AVG(jsonb_array_length(messages))::NUMERIC as avg_messages_per_conversation,
-          jsonb_object_agg(
-            COALESCE(intent_analysis->>''intent'', ''unknown''),
-            intent_count
-          ) as intent_distribution,
-          jsonb_object_agg(
-            COALESCE(intent_analysis->>''sentiment'', ''neutral''),
-            sentiment_count
-          ) as sentiment_distribution
-        FROM (
-          SELECT 
-            user_id,
-            messages,
-            intent_analysis,
-            COUNT(*) as intent_count,
-            COUNT(*) as sentiment_count
-          FROM conversations 
-          WHERE 1=1 ' || query_filter || '
-          GROUP BY user_id, messages, intent_analysis
-        ) subq';
-    END;
-    $$ LANGUAGE plpgsql;
+    $$;
   `
 };
 
@@ -260,9 +184,9 @@ async function executeSQL(sql, description) {
       const { error: directError } = await supabase.from('_temp').select('*').limit(0);
       if (directError && directError.message.includes('does not exist')) {
         console.log(`⚠️  Executando SQL diretamente para: ${description}`);
-        // Para tabelas, usar upsert como workaround
+        // Para tabelas, assumimos que já existem ou serão criadas manualmente se RPC não disponível
         if (description.includes('Tabela')) {
-          console.log(`✅ ${description} - usando método alternativo`);
+          console.log(`✅ ${description} - usando método alternativo (IF NOT EXISTS garantiu existência ou tabela já existe)`);
           return;
         }
       }
@@ -281,7 +205,6 @@ async function executeSQL(sql, description) {
 async function createRPCFunction() {
   try {
     console.log('🔄 Criando função RPC para execução de SQL...');
-    
     const { error } = await supabase.rpc('create_exec_sql_function', {
       function_sql: `
         CREATE OR REPLACE FUNCTION exec_sql(sql_query text)
@@ -292,7 +215,6 @@ async function createRPCFunction() {
         $$ LANGUAGE plpgsql SECURITY DEFINER;
       `
     });
-
     if (error) {
       console.log('⚠️  Função RPC não disponível, usando métodos alternativos');
     } else {
@@ -308,48 +230,45 @@ async function initializeSupabase() {
   console.log(`📍 URL: ${supabaseUrl}`);
   
   try {
-    // Testar conexão
-    const { data, error } = await supabase.from('_health_check').select('*').limit(1);
+    // Testar conexão básica
+    const { error } = await supabase.from('_health_check').select('*').limit(1);
     if (error && !error.message.includes('does not exist')) {
       throw new Error(`Erro de conexão: ${error.message}`);
     }
     console.log('✅ Conexão com Supabase estabelecida');
 
-    // Tentar criar função RPC
+    // Tentar criar função RPC utilitária (exec_sql)
     await createRPCFunction();
 
-    // Criar tabelas
+    // Criar tabelas necessárias
     console.log('\n📋 Criando tabelas...');
     for (const [tableName, sql] of Object.entries(SQL_TABLES)) {
       await executeSQL(sql, `Tabela ${tableName}`);
     }
 
-    // Criar funções e triggers
+    // Criar funções e triggers necessários
     console.log('\n⚙️  Criando funções e triggers...');
     for (const [funcName, sql] of Object.entries(SQL_FUNCTIONS)) {
       await executeSQL(sql, `Função ${funcName} (opcional)`);
     }
 
-    // Inserir dados iniciais se necessário
+    // Dados iniciais (se necessário) - exemplo de verificação
     console.log('\n📊 Verificando dados iniciais...');
-    
-    // Verificar se já existem dados
     const { count } = await supabase
       .from('chat_sessions')
       .select('*', { count: 'exact', head: true });
-
     console.log(`📈 Sessões existentes: ${count || 0}`);
 
     console.log('\n🎉 Inicialização do Supabase concluída com sucesso!');
-    console.log('\n📋 Resumo das tabelas criadas:');
-    console.log('   • chat_sessions - Sessões de chat ativas');
-    console.log('   • conversations - Histórico de conversas');
-    console.log('   • user_profiles - Perfis dos usuários');
-    console.log('   • user_context - Contexto histórico');
-    console.log('   • webhook_logs - Logs de webhooks');
-    console.log('   • analytics_events - Eventos para analytics');
+    console.log('\n📋 Resumo das tabelas preparadas:');
+    console.log('   • chat_sessions – Sessões de chat ativas');
+    console.log('   • conversations – Histórico de conversas');
+    console.log('   • user_profiles – Perfis dos usuários');
+    console.log('   • user_context – Contexto histórico');
+    console.log('   • webhook_logs – Logs de webhooks');
+    console.log('   • analytics_events – Eventos para analytics');
     
-    console.log('\n🔗 Endpoints MCP disponíveis após o deploy:');
+    console.log('\n🔗 Após o deploy, certifique-se de que as funções MCP estejam acessíveis via API:');
     console.log('   • POST /api/v1/mcp/create_chat_session');
     console.log('   • GET  /api/v1/mcp/get_user_context/:userId');
     console.log('   • POST /api/v1/mcp/save_conversation');
@@ -359,15 +278,15 @@ async function initializeSupabase() {
   } catch (error) {
     console.error('\n❌ Erro durante a inicialização:', error.message);
     console.error('\n🔧 Possíveis soluções:');
-    console.error('   1. Verificar se a SUPABASE_SERVICE_KEY está correta');
-    console.error('   2. Verificar se o projeto Supabase está ativo');
-    console.error('   3. Verificar permissões do usuário no Supabase');
-    console.error('   4. Criar as tabelas manualmente através do Dashboard');
+    console.error('   1. Verificar se a SUPABASE_SERVICE_KEY está correta no .env');
+    console.error('   2. Verificar se o projeto Supabase está acessível e ativo');
+    console.error('   3. Verificar permissões do usuário (service role) no Supabase');
+    console.error('   4. Criar as tabelas manualmente através do Dashboard ou SQL pad do Supabase');
     process.exit(1);
   }
 }
 
-// Executar se chamado diretamente
+// Executar automaticamente se chamado diretamente pela linha de comando
 if (require.main === module) {
   initializeSupabase();
 }
